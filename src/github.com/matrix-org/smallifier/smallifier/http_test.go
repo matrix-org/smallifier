@@ -81,6 +81,23 @@ func TestNonHTTPS(t *testing.T) {
 	}
 }
 
+func TestTooLong(t *testing.T) {
+	f := serve(t)
+	defer f.Close()
+
+	resp, err := insecureClient().Post(f.server.URL+"/_create", "application/json", strings.NewReader(`{
+		"long_url": "https://lemurs.win/`+strings.Repeat("yestheydo", 100)+`",
+		"secret": "`+testSecret+`"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Error("too long link: want status code 400 got", resp.StatusCode)
+	}
+}
+
 func TestNoSecret(t *testing.T) {
 	f := serve(t)
 	defer f.Close()
@@ -198,7 +215,7 @@ func serve(t *testing.T) fixture {
 	server := httptest.NewTLSServer(m)
 	u, _ := url.Parse(server.URL + "/")
 
-	smallifier := New(*u, db, testSecret)
+	smallifier := New(*u, db, testSecret, 256)
 	m.s = smallifier
 	return fixture{
 		t,

@@ -16,10 +16,11 @@ import (
 )
 
 var (
-	base     = flag.String("base-url", "", "Base URL for links, e.g. https://mtrx.to/")
-	addr     = flag.String("addr", "", "Address to listen for matrix requests on")
-	secret   = flag.String("secret", "", "Secret which must be passed to create requests")
-	sqliteDB = flag.String("sqlite-db", "smallifier.db", "Path to sqlite3 database for persistent storage")
+	base        = flag.String("base-url", "", "Base URL for links, e.g. https://mtrx.to/")
+	addr        = flag.String("addr", "", "Address to listen for matrix requests on")
+	secret      = flag.String("secret", "", "Secret which must be passed to create requests")
+	lengthLimit = flag.Int("length-limit", 256, "Length limit of URLs being shortened. <= 0 means no limit.")
+	sqliteDB    = flag.String("sqlite-db", "smallifier.db", "Path to sqlite3 database for persistent storage")
 )
 
 func main() {
@@ -42,7 +43,7 @@ func main() {
 		panic(err)
 	}
 
-	s := smallifier.New(*baseURL, db, *secret)
+	s := smallifier.New(*baseURL, db, *secret, *lengthLimit)
 
 	prometheus.MustRegister(prometheus.NewCounterFunc(
 		prometheus.CounterOpts{

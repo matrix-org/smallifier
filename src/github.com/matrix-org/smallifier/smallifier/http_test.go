@@ -16,10 +16,13 @@ import (
 	"testing"
 )
 
-var stubResponse = "Go go gadget lemurs"
+var (
+	stubResponse = "Go go gadget lemurs"
+	testSecret   = "Ringtails have stripy, stripy tails"
+)
 
 func TestRoundtrip(t *testing.T) {
-	server, c := serve(t)
+	server, _, c := serve(t)
 	defer c()
 
 	shortened := shorten(t, server.URL, server.URL+"/_stub")
@@ -37,7 +40,10 @@ func TestRoundtrip(t *testing.T) {
 }
 
 func shorten(t *testing.T, serverBaseURL, toShorten string) string {
-	resp, err := insecureClient().Post(serverBaseURL+"/_create", "application/json", strings.NewReader(`{"long_url": "`+toShorten+`"}`))
+	resp, err := insecureClient().Post(serverBaseURL+"/_create", "application/json", strings.NewReader(`{
+		"long_url": "`+toShorten+`",
+		"secret": "`+testSecret+`"
+	}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,10 +60,13 @@ func shorten(t *testing.T, serverBaseURL, toShorten string) string {
 }
 
 func TestNonHTTPS(t *testing.T) {
-	server, c := serve(t)
+	server, _, c := serve(t)
 	defer c()
 
-	resp, err := insecureClient().Post(server.URL+"/_create", "application/json", strings.NewReader(`{"long_url": "http://lemurs.win"}`))
+	resp, err := insecureClient().Post(server.URL+"/_create", "application/json", strings.NewReader(`{
+		"long_url": "http://lemurs.win",
+		"secret": "`+testSecret+`"
+	}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +76,44 @@ func TestNonHTTPS(t *testing.T) {
 	}
 }
 
-func serve(t *testing.T) (*httptest.Server, func()) {
+func TestNoSecret(t *testing.T) {
+	server, smallifier, c := serve(t)
+	defer c()
+
+	resp, err := insecureClient().Post(server.URL+"/_create", "application/json", strings.NewReader(`{"long_url": "https://lemurs.win"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Error("no secret: want status code 401 got", resp.StatusCode)
+	}
+	if got := smallifier.AuthErrors(); got != 1 {
+		t.Error("auth error count: want 1 got %d", got)
+	}
+}
+
+func TestWrongSecret(t *testing.T) {
+	server, smallifier, c := serve(t)
+	defer c()
+
+	resp, err := insecureClient().Post(server.URL+"/_create", "application/json", strings.NewReader(`{
+		"long_url": "https://lemurs.win",
+		"secret": "wrong`+testSecret+`"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Error("no secret: want status code 401 got", resp.StatusCode)
+	}
+	if got := smallifier.AuthErrors(); got != 1 {
+		t.Error("auth error count: want 1 got %d", got)
+	}
+}
+
+func serve(t *testing.T) (*httptest.Server, *smallifier, func()) {
 	dir, err := ioutil.TempDir("", "smallifier")
 	if err != nil {
 		t.Fatal(err)
@@ -80,14 +126,15 @@ func serve(t *testing.T) (*httptest.Server, func()) {
 		t.Fatal(err)
 	}
 	s := &smallifier{
-		db: db,
+		db:     db,
+		secret: testSecret,
 	}
 
 	m := &mux{s}
 	server := httptest.NewTLSServer(m)
 	u, _ := url.Parse(server.URL + "/")
 	s.base = *u
-	return server, func() {
+	return server, s, func() {
 		server.Close()
 		db.Close()
 		os.RemoveAll(dir)

@@ -24,13 +24,14 @@ import (
 var (
 	base     = flag.String("base-url", "", "Base URL for links, e.g. https://mtrx.to/")
 	addr     = flag.String("addr", "", "Address to listen for matrix requests on")
+	secret   = flag.String("secret", "", "Secret which must be passed to create requests")
 	sqliteDB = flag.String("sqlite-db", "smallifier.db", "Path to sqlite3 database for persistent storage")
 )
 
 func main() {
 	flag.Parse()
-	if *base == "" || *addr == "" {
-		panic("Must specify base-url and addr")
+	if *base == "" || *addr == "" || *secret == "" {
+		panic("Must specify non-empty base-url, addr, and secret")
 	}
 	baseURL, err := url.Parse(*base)
 	if err != nil {
@@ -48,8 +49,9 @@ func main() {
 	}
 
 	s := &smallifier{
-		base: *baseURL,
-		db:   db,
+		base:   *baseURL,
+		db:     db,
+		secret: *secret,
 	}
 
 	prometheus.MustRegister(prometheus.NewCounterFunc(
@@ -58,6 +60,13 @@ func main() {
 			Help: "Counts number of errors encountered when trying to generate secure random numbers",
 		},
 		s.RandomErrors))
+
+	prometheus.MustRegister(prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Name: "auth_error_count",
+			Help: "Counts number of errors encountered because of missing or incorrect secrets",
+		},
+		s.AuthErrors))
 
 	http.HandleFunc("/_create", s.CreateHandler)
 	http.HandleFunc("/", s.LookupHandler)
@@ -68,6 +77,7 @@ func main() {
 type SmallifierRequest struct {
 	// LongURL is the link to be shortened.
 	LongURL string `json:"long_url"`
+	Secret  string `json:"secret"`
 }
 
 // SmallifierResponse is the JSON-encoded POST-body of the response to a request to generate a short link.
@@ -79,7 +89,9 @@ type SmallifierResponse struct {
 type smallifier struct {
 	base             url.URL
 	db               *sql.DB
+	secret           string
 	randomErrorCount uint64
+	authErrorCount   uint64
 }
 
 // LookupHandler is an http.HandlerFunc which looks up a short link and either 302s to it, or 404s.
@@ -123,6 +135,14 @@ func (s *smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if jsonReq.Secret != s.secret {
+		atomic.AddUint64(&s.authErrorCount, 1)
+		log.WithField("bad_secret", jsonReq.Secret).Error("Refusing to linkify with wrong secret")
+		w.WriteHeader(401)
+		io.WriteString(w, `{"error": "Must specify correct secret"}`)
+		return
+	}
+
 	if !strings.HasPrefix(jsonReq.LongURL, "https://") {
 		log.WithField("url", jsonReq.LongURL).Error("Refusing to linkify non-https link")
 		w.WriteHeader(400)
@@ -146,6 +166,10 @@ func (s *smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
 // This being non-zero likely indicates the OS is having trouble generating randomness, which is really bad.
 func (s *smallifier) RandomErrors() float64 {
 	return float64(atomic.LoadUint64(&s.randomErrorCount))
+}
+
+func (s *smallifier) AuthErrors() float64 {
+	return float64(atomic.LoadUint64(&s.authErrorCount))
 }
 
 func (s *smallifier) generateShortPath(link string) (string, error) {

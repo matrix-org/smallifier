@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	log "github.com/Sirupsen/logrus"
 )
@@ -30,18 +31,68 @@ type Response struct {
 	ShortURL string `json:"short_url"`
 }
 
+// Smallifier implements a basic link shortener.
+type Smallifier interface {
+	// HTTP handler which accepts a JSON object containing a long_url and secret, and returns a JSON object with a short_url.
+	CreateHandler(w http.ResponseWriter, req *http.Request)
+	// HTTP handler which redirects to the long URL for the requested path.
+	LookupHandler(w http.ResponseWriter, req *http.Request)
+
+	// RandomErrors gets a count of the number of times that we were unable to generate a random number.
+	// In normal operating conditions, this should always return 0.
+	// This being non-zero likely indicates the OS is having trouble generating randomness, which is really bad.
+	RandomErrors() float64
+	// AuthErrors gets a count of attempts made to create links without proper auth.
+	AuthErrors() float64
+	// DBUpdateErrors gets a count of attempts made to update the database which failed.
+	DBUpdateErrors() float64
+}
+
+// New makes a new Smallifier.
+func New(base url.URL, db *sql.DB, secret string) Smallifier {
+	s := &smallifier{
+		Base:    base,
+		DB:      db,
+		Secret:  secret,
+		follows: make(chan follow, 1024*1024),
+	}
+
+	go func() {
+		for f := range s.follows {
+			if _, err := s.DB.Exec(`INSERT INTO follows (short_path, ts, ip, forwarded_for) VALUES ($1, $2, $3, $4)`, f.shortPath, f.timestamp, f.ip, f.forwardedFor); err != nil {
+				log.WithField("err", err).Error("Error inserting follow")
+				atomic.AddUint64(&s.dbUpdateErrorCount, 1)
+			}
+			atomic.AddInt64(&s.pendingFollows, -1)
+		}
+	}()
+
+	return s
+}
+
 // Smallifier generates short links which redirect to the long versions of the links.
-type Smallifier struct {
+type smallifier struct {
 	Base   url.URL // The base URL which should be prepended to all shortlinks.
 	DB     *sql.DB // The database in which to store links.
 	Secret string  // A shared-secret string which must be passed in order to create shortlinks.
 
-	randomErrorCount uint64
-	authErrorCount   uint64
+	follows        chan follow
+	pendingFollows int64
+
+	randomErrorCount   uint64
+	authErrorCount     uint64
+	dbUpdateErrorCount uint64
+}
+
+type follow struct {
+	shortPath    string
+	timestamp    int64
+	ip           string
+	forwardedFor string
 }
 
 // LookupHandler is an http.HandlerFunc which looks up a short link and either 302s to it, or 404s.
-func (s *Smallifier) LookupHandler(w http.ResponseWriter, req *http.Request) {
+func (s *smallifier) LookupHandler(w http.ResponseWriter, req *http.Request) {
 	setHeaders(w)
 
 	if !strings.HasPrefix(req.URL.Path, s.Base.Path) {
@@ -55,6 +106,15 @@ func (s *Smallifier) LookupHandler(w http.ResponseWriter, req *http.Request) {
 	if err == nil {
 		w.Header().Set("Location", link)
 		w.WriteHeader(302)
+
+		atomic.AddInt64(&s.pendingFollows, 1)
+		s.follows <- follow{
+			shortPath:    shortPath,
+			timestamp:    time.Now().Unix(),
+			ip:           req.RemoteAddr,
+			forwardedFor: req.Header.Get("X-Forwarded-For"),
+		}
+
 		return
 	}
 	if err == sql.ErrNoRows {
@@ -68,7 +128,7 @@ func (s *Smallifier) LookupHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 // CreateHandler is an http.HandlerFunc which creates a shortlink as a JSON-encoded Request in the request body and returns it as a JSON-encoded Response.
-func (s *Smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
+func (s *smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
 	setHeaders(w)
 
 	defer req.Body.Close()
@@ -96,7 +156,7 @@ func (s *Smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	id, err := s.generateShortPath(jsonReq.LongURL)
+	id, err := s.generateShortPath(jsonReq.LongURL, req.RemoteAddr, req.Header.Get("X-Forwarded-For"))
 	if err != nil {
 		w.WriteHeader(500)
 		io.WriteString(w, err.Error())
@@ -110,16 +170,21 @@ func (s *Smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
 // RandomErrors gets a count of the number of times that we were unable to generate a random number.
 // In normal operating conditions, this should always return 0.
 // This being non-zero likely indicates the OS is having trouble generating randomness, which is really bad.
-func (s *Smallifier) RandomErrors() float64 {
+func (s *smallifier) RandomErrors() float64 {
 	return float64(atomic.LoadUint64(&s.randomErrorCount))
 }
 
 // AuthErrors gets a count of attempts made to create links without proper auth.
-func (s *Smallifier) AuthErrors() float64 {
+func (s *smallifier) AuthErrors() float64 {
 	return float64(atomic.LoadUint64(&s.authErrorCount))
 }
 
-func (s *Smallifier) generateShortPath(link string) (string, error) {
+// DBUpdateErrors gets a count of attempts made to update the database which failed.
+func (s *smallifier) DBUpdateErrors() float64 {
+	return float64(atomic.LoadUint64(&s.dbUpdateErrorCount))
+}
+
+func (s *smallifier) generateShortPath(link, ip, forwardedFor string) (string, error) {
 	for i := 0; i < 30; i++ {
 		buf := make([]byte, 6)
 		if _, err := rand.Read(buf); err != nil {
@@ -130,7 +195,7 @@ func (s *Smallifier) generateShortPath(link string) (string, error) {
 
 		shortPath := base64.RawURLEncoding.EncodeToString(buf)
 
-		_, err := s.DB.Exec("INSERT INTO links (short_path, long_url) VALUES ($1, $2)", shortPath, link)
+		_, err := s.DB.Exec("INSERT INTO links (short_path, long_url, create_ts, create_ip, create_forwarded_for) VALUES ($1, $2, $3, $4, $5)", shortPath, link, time.Now().Unix(), ip, forwardedFor)
 		if err == nil {
 			return shortPath, nil
 		}
@@ -148,17 +213,31 @@ func setHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept")
 }
 
-// CreateTable creates the necessary database tables in db if they are absent.
-func CreateTable(db *sql.DB) error {
+// CreateTables creates the necessary database tables in db if they are absent.
+func CreateTables(db *sql.DB) error {
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS links(
 		id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
 		short_path TEXT NOT NULL UNIQUE,
-		long_url TEXT NOT NULL
+		long_url TEXT NOT NULL,
+		create_ts BIGINT NOT NULL,
+		create_ip TEXT NOT NULL,
+		create_forwarded_for TEXT
 	)`)
 	if err != nil {
 		return err
 	}
 
 	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS links_short_path on links(short_path)`)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS follows(
+		id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+		short_path TEXT NOT NULL,
+		ts BIGINT NOT NULL,
+		ip TEXT NOT NULL,
+		forwarded_for TEXT
+	)`)
 	return err
 }

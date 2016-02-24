@@ -12,8 +12,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -24,10 +27,10 @@ var (
 )
 
 func TestRoundtrip(t *testing.T) {
-	server, _, c := serve(t)
-	defer c()
+	f := serve(t)
+	defer f.Close()
 
-	shortened := shorten(t, server.URL, server.URL+"/_stub")
+	shortened := shorten(t, f.server.URL, f.server.URL+"/_stub")
 
 	resp, err := insecureClient().Get(shortened)
 	if err != nil {
@@ -62,10 +65,10 @@ func shorten(t *testing.T, serverBaseURL, toShorten string) string {
 }
 
 func TestNonHTTPS(t *testing.T) {
-	server, _, c := serve(t)
-	defer c()
+	f := serve(t)
+	defer f.Close()
 
-	resp, err := insecureClient().Post(server.URL+"/_create", "application/json", strings.NewReader(`{
+	resp, err := insecureClient().Post(f.server.URL+"/_create", "application/json", strings.NewReader(`{
 		"long_url": "http://lemurs.win",
 		"secret": "`+testSecret+`"
 	}`))
@@ -79,10 +82,10 @@ func TestNonHTTPS(t *testing.T) {
 }
 
 func TestNoSecret(t *testing.T) {
-	server, smallifier, c := serve(t)
-	defer c()
+	f := serve(t)
+	defer f.Close()
 
-	resp, err := insecureClient().Post(server.URL+"/_create", "application/json", strings.NewReader(`{"long_url": "https://lemurs.win"}`))
+	resp, err := insecureClient().Post(f.server.URL+"/_create", "application/json", strings.NewReader(`{"long_url": "https://lemurs.win"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,16 +93,16 @@ func TestNoSecret(t *testing.T) {
 	if resp.StatusCode != 401 {
 		t.Error("no secret: want status code 401 got", resp.StatusCode)
 	}
-	if got := smallifier.AuthErrors(); got != 1 {
+	if got := f.smallifier.AuthErrors(); got != 1 {
 		t.Errorf("auth error count: want 1 got %f", got)
 	}
 }
 
 func TestWrongSecret(t *testing.T) {
-	server, smallifier, c := serve(t)
-	defer c()
+	f := serve(t)
+	defer f.Close()
 
-	resp, err := insecureClient().Post(server.URL+"/_create", "application/json", strings.NewReader(`{
+	resp, err := insecureClient().Post(f.server.URL+"/_create", "application/json", strings.NewReader(`{
 		"long_url": "https://lemurs.win",
 		"secret": "wrong`+testSecret+`"
 	}`))
@@ -110,12 +113,75 @@ func TestWrongSecret(t *testing.T) {
 	if resp.StatusCode != 401 {
 		t.Error("no secret: want status code 401 got", resp.StatusCode)
 	}
-	if got := smallifier.AuthErrors(); got != 1 {
+	if got := f.smallifier.AuthErrors(); got != 1 {
 		t.Errorf("auth error count: want 1 got %f", got)
 	}
 }
 
-func serve(t *testing.T) (*httptest.Server, *Smallifier, func()) {
+func TestRecordsStats(t *testing.T) {
+	f := serve(t)
+	defer f.Close()
+
+	shortened := shorten(t, f.server.URL, f.base+"/_stub")
+	shortPath := shortened[len(f.base):]
+
+	r := f.db.QueryRow(`SELECT create_ts FROM links WHERE short_path = $1`, shortPath)
+	var createTS int64
+	if err := r.Scan(&createTS); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	if createTS > now || createTS < now-10 {
+		t.Errorf("create TS: want roughly %d got %d", now, createTS)
+	}
+
+	assertFollowCount(f, shortPath, 0, "before following:")
+
+	resp, err := insecureClient().Get(shortened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ioutil.ReadAll(resp.Body)
+	if got := string(b); stubResponse != got {
+		dump, _ := httputil.DumpResponse(resp, false)
+		t.Errorf("wrong response; want %q got %q HTTP response: %s", stubResponse, got, dump)
+	}
+
+	assertFollowCount(f, shortPath, 1, "after following:")
+
+}
+
+func assertFollowCount(f fixture, shortPath string, want int64, msg string) {
+	for atomic.LoadInt64(&f.smallifier.(*smallifier).pendingFollows) > 0 {
+		runtime.Gosched()
+	}
+
+	r := f.db.QueryRow(`SELECT COUNT(*) FROM follows WHERE short_path = $1`, shortPath)
+	var got int64
+	if err := r.Scan(&got); err != nil {
+		f.t.Fatal(msg, err)
+	}
+	if want != got {
+		f.t.Errorf("%s follow count want: %d got: %d", msg, want, got)
+	}
+}
+
+type fixture struct {
+	t          *testing.T
+	server     *httptest.Server
+	smallifier Smallifier
+	base       string
+	db         *sql.DB
+	dir        string
+}
+
+func (f *fixture) Close() {
+	f.server.Close()
+	f.db.Close()
+	os.RemoveAll(f.dir)
+}
+
+func serve(t *testing.T) fixture {
 	dir, err := ioutil.TempDir("", "smallifier")
 	if err != nil {
 		t.Fatal(err)
@@ -124,27 +190,28 @@ func serve(t *testing.T) (*httptest.Server, *Smallifier, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := CreateTable(db); err != nil {
+	if err := CreateTables(db); err != nil {
 		t.Fatal(err)
 	}
-	s := &Smallifier{
-		DB:     db,
-		Secret: testSecret,
-	}
 
-	m := &mux{s}
+	m := &mux{nil}
 	server := httptest.NewTLSServer(m)
 	u, _ := url.Parse(server.URL + "/")
-	s.Base = *u
-	return server, s, func() {
-		server.Close()
-		db.Close()
-		os.RemoveAll(dir)
+
+	smallifier := New(*u, db, testSecret)
+	m.s = smallifier
+	return fixture{
+		t,
+		server,
+		smallifier,
+		u.String(),
+		db,
+		dir,
 	}
 }
 
 type mux struct {
-	s *Smallifier
+	s Smallifier
 }
 
 func (m *mux) ServeHTTP(w http.ResponseWriter, req *http.Request) {

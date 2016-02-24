@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 var (
@@ -52,7 +54,7 @@ func shorten(t *testing.T, serverBaseURL, toShorten string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var r SmallifierResponse
+	var r Response
 	if err := json.Unmarshal(b, &r); err != nil {
 		t.Fatal(err)
 	}

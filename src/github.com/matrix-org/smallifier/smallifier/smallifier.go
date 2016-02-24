@@ -1,4 +1,4 @@
-// smallifier is a basic link-shortener.
+// Package smallifier is a basic link-shortener.
 // It supplies HTTP handlers to allow short links to be generated and followed.
 package smallifier
 
@@ -15,18 +15,17 @@ import (
 	"sync/atomic"
 
 	log "github.com/Sirupsen/logrus"
-	_ "github.com/mattn/go-sqlite3"
 )
 
-// SmallifierRequest is the JSON-encoded POST-body of an HTTP request to generate a short link.
-type SmallifierRequest struct {
+// Request is the JSON-encoded POST-body of an HTTP request to generate a short link.
+type Request struct {
 	// LongURL is the link to be shortened.
 	LongURL string `json:"long_url"`
 	Secret  string `json:"secret"`
 }
 
-// SmallifierResponse is the JSON-encoded POST-body of the response to a request to generate a short link.
-type SmallifierResponse struct {
+// Response is the JSON-encoded POST-body of the response to a request to generate a short link.
+type Response struct {
 	// ShortURL is the generated short-link.
 	ShortURL string `json:"short_url"`
 }
@@ -67,13 +66,13 @@ func (s *Smallifier) LookupHandler(w http.ResponseWriter, req *http.Request) {
 	io.WriteString(w, `{"error": "internal server error"}`)
 }
 
-// CreateHandler is an http.HandlerFunc which creates a shortlink as a JSON-encoded SmallifierRequest in the request body and returns it as a JSON-encoded SmallifierResponse.
+// CreateHandler is an http.HandlerFunc which creates a shortlink as a JSON-encoded Request in the request body and returns it as a JSON-encoded Response.
 func (s *Smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
 	setHeaders(w)
 
 	defer req.Body.Close()
 	dec := json.NewDecoder(req.Body)
-	var jsonReq SmallifierRequest
+	var jsonReq Request
 	if err := dec.Decode(&jsonReq); err != nil {
 		log.Error("Got bad json: ", err)
 		w.WriteHeader(400)
@@ -104,7 +103,7 @@ func (s *Smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	enc := json.NewEncoder(w)
-	enc.Encode(SmallifierResponse{s.Base.String() + id})
+	enc.Encode(Response{s.Base.String() + id})
 }
 
 // RandomErrors gets a count of the number of times that we were unable to generate a random number.

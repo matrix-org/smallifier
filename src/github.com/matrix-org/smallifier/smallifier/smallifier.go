@@ -30,10 +30,11 @@ type Response struct {
 	ShortURL string `json:"short_url"`
 }
 
+// Smallifier generates short links which redirect to the long versions of the links.
 type Smallifier struct {
-	Base   url.URL
-	DB     *sql.DB
-	Secret string
+	Base   url.URL // The base URL which should be prepended to all shortlinks.
+	DB     *sql.DB // The database in which to store links.
+	Secret string  // A shared-secret string which must be passed in order to create shortlinks.
 
 	randomErrorCount uint64
 	authErrorCount   uint64

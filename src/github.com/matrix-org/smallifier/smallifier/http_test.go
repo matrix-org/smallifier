@@ -1,4 +1,4 @@
-package main
+package smallifier
 
 import (
 	"crypto/tls"
@@ -113,7 +113,7 @@ func TestWrongSecret(t *testing.T) {
 	}
 }
 
-func serve(t *testing.T) (*httptest.Server, *smallifier, func()) {
+func serve(t *testing.T) (*httptest.Server, *Smallifier, func()) {
 	dir, err := ioutil.TempDir("", "smallifier")
 	if err != nil {
 		t.Fatal(err)
@@ -122,18 +122,18 @@ func serve(t *testing.T) (*httptest.Server, *smallifier, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := createTable(db); err != nil {
+	if err := CreateTable(db); err != nil {
 		t.Fatal(err)
 	}
-	s := &smallifier{
-		db:     db,
-		secret: testSecret,
+	s := &Smallifier{
+		DB:     db,
+		Secret: testSecret,
 	}
 
 	m := &mux{s}
 	server := httptest.NewTLSServer(m)
 	u, _ := url.Parse(server.URL + "/")
-	s.base = *u
+	s.Base = *u
 	return server, s, func() {
 		server.Close()
 		db.Close()
@@ -142,7 +142,7 @@ func serve(t *testing.T) (*httptest.Server, *smallifier, func()) {
 }
 
 type mux struct {
-	s *smallifier
+	s *Smallifier
 }
 
 func (m *mux) ServeHTTP(w http.ResponseWriter, req *http.Request) {

@@ -1,4 +1,7 @@
 *.swp
+golint.txt
+govet.txt
+results.xml
 
 # Compiled Object files, Static and Dynamic libs (Shared Objects)
 *.o

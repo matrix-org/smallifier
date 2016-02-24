@@ -89,7 +89,7 @@ func TestNoSecret(t *testing.T) {
 		t.Error("no secret: want status code 401 got", resp.StatusCode)
 	}
 	if got := smallifier.AuthErrors(); got != 1 {
-		t.Error("auth error count: want 1 got %d", got)
+		t.Errorf("auth error count: want 1 got %f", got)
 	}
 }
 
@@ -109,7 +109,7 @@ func TestWrongSecret(t *testing.T) {
 		t.Error("no secret: want status code 401 got", resp.StatusCode)
 	}
 	if got := smallifier.AuthErrors(); got != 1 {
-		t.Error("auth error count: want 1 got %d", got)
+		t.Errorf("auth error count: want 1 got %f", got)
 	}
 }
 

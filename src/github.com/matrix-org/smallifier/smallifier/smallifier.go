@@ -147,6 +147,7 @@ func setHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept")
 }
 
+// CreateTable creates the necessary database tables in db if they are absent.
 func CreateTable(db *sql.DB) error {
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS links(
 		id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,

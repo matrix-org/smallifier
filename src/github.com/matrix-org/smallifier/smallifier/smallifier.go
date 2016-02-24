@@ -51,15 +51,15 @@ type Smallifier interface {
 // New makes a new Smallifier.
 func New(base url.URL, db *sql.DB, secret string) Smallifier {
 	s := &smallifier{
-		Base:    base,
-		DB:      db,
-		Secret:  secret,
-		follows: make(chan follow, 1024*1024),
+		base:        base,
+		db:          db,
+		secret:      secret,
+		follows:     make(chan follow, 1024*1024),
 	}
 
 	go func() {
 		for f := range s.follows {
-			if _, err := s.DB.Exec(`INSERT INTO follows (short_path, ts, ip, forwarded_for) VALUES ($1, $2, $3, $4)`, f.shortPath, f.timestamp, f.ip, f.forwardedFor); err != nil {
+			if _, err := s.db.Exec(`INSERT INTO follows (short_path, ts, ip, forwarded_for) VALUES ($1, $2, $3, $4)`, f.shortPath, f.timestamp, f.ip, f.forwardedFor); err != nil {
 				log.WithField("err", err).Error("Error inserting follow")
 				atomic.AddUint64(&s.dbUpdateErrorCount, 1)
 			}
@@ -70,11 +70,10 @@ func New(base url.URL, db *sql.DB, secret string) Smallifier {
 	return s
 }
 
-// Smallifier generates short links which redirect to the long versions of the links.
 type smallifier struct {
-	Base   url.URL // The base URL which should be prepended to all shortlinks.
-	DB     *sql.DB // The database in which to store links.
-	Secret string  // A shared-secret string which must be passed in order to create shortlinks.
+	base        url.URL
+	db          *sql.DB
+	secret      string
 
 	follows        chan follow
 	pendingFollows int64
@@ -95,12 +94,12 @@ type follow struct {
 func (s *smallifier) LookupHandler(w http.ResponseWriter, req *http.Request) {
 	setHeaders(w)
 
-	if !strings.HasPrefix(req.URL.Path, s.Base.Path) {
+	if !strings.HasPrefix(req.URL.Path, s.base.Path) {
 		w.WriteHeader(404)
 		return
 	}
-	shortPath := req.URL.Path[len(s.Base.Path):]
-	row := s.DB.QueryRow("SELECT long_url FROM links WHERE short_path = $1", shortPath)
+	shortPath := req.URL.Path[len(s.base.Path):]
+	row := s.db.QueryRow("SELECT long_url FROM links WHERE short_path = $1", shortPath)
 	var link string
 	err := row.Scan(&link)
 	if err == nil {
@@ -141,7 +140,7 @@ func (s *smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if jsonReq.Secret != s.Secret {
+	if jsonReq.Secret != s.secret {
 		atomic.AddUint64(&s.authErrorCount, 1)
 		log.WithField("bad_secret", jsonReq.Secret).Error("Refusing to linkify with wrong secret")
 		w.WriteHeader(401)
@@ -164,7 +163,7 @@ func (s *smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	enc := json.NewEncoder(w)
-	enc.Encode(Response{s.Base.String() + id})
+	enc.Encode(Response{s.base.String() + id})
 }
 
 // RandomErrors gets a count of the number of times that we were unable to generate a random number.
@@ -195,7 +194,7 @@ func (s *smallifier) generateShortPath(link, ip, forwardedFor string) (string, e
 
 		shortPath := base64.RawURLEncoding.EncodeToString(buf)
 
-		_, err := s.DB.Exec("INSERT INTO links (short_path, long_url, create_ts, create_ip, create_forwarded_for) VALUES ($1, $2, $3, $4, $5)", shortPath, link, time.Now().Unix(), ip, forwardedFor)
+		_, err := s.db.Exec("INSERT INTO links (short_path, long_url, create_ts, create_ip, create_forwarded_for) VALUES ($1, $2, $3, $4, $5)", shortPath, link, time.Now().Unix(), ip, forwardedFor)
 		if err == nil {
 			return shortPath, nil
 		}

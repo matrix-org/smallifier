@@ -154,7 +154,7 @@ func (s *smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
 	if s.lengthLimit > 0 && len(jsonReq.LongURL) > s.lengthLimit {
 		log.WithField("url", jsonReq.LongURL).Error("Refusing to linkify long link")
 		w.WriteHeader(400)
-		io.WriteString(w, fmt.Sprintf(`{"error": "Links must be shorted than %d runes"}`, s.lengthLimit))
+		io.WriteString(w, fmt.Sprintf(`{"error": "Links must be shorted than %d bytes"}`, s.lengthLimit))
 		return
 	}
 

@@ -38,15 +38,11 @@ func main() {
 	}
 	defer db.Close()
 
-	if err := smallifier.CreateTable(db); err != nil {
+	if err := smallifier.CreateTables(db); err != nil {
 		panic(err)
 	}
 
-	s := &smallifier.Smallifier{
-		Base:   *baseURL,
-		DB:     db,
-		Secret: *secret,
-	}
+	s := smallifier.New(*baseURL, db, *secret)
 
 	prometheus.MustRegister(prometheus.NewCounterFunc(
 		prometheus.CounterOpts{
@@ -61,6 +57,13 @@ func main() {
 			Help: "Counts number of errors encountered because of missing or incorrect secrets",
 		},
 		s.AuthErrors))
+
+	prometheus.MustRegister(prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Name: "db_update_error_count",
+			Help: "Counts number of errors encountered updating the database",
+		},
+		s.DBUpdateErrors))
 
 	http.HandleFunc("/_create", s.CreateHandler)
 	http.HandleFunc("/", s.LookupHandler)

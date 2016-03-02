@@ -49,11 +49,13 @@ type Smallifier interface {
 }
 
 // New makes a new Smallifier.
-func New(base url.URL, db *sql.DB, secret string) Smallifier {
+// Links must be at most lengthLimit runes long; <= 0 means no limit.
+func New(base url.URL, db *sql.DB, secret string, lengthLimit int) Smallifier {
 	s := &smallifier{
 		base:        base,
 		db:          db,
 		secret:      secret,
+		lengthLimit: lengthLimit,
 		follows:     make(chan follow, 1024*1024),
 	}
 
@@ -74,6 +76,7 @@ type smallifier struct {
 	base        url.URL
 	db          *sql.DB
 	secret      string
+	lengthLimit int
 
 	follows        chan follow
 	pendingFollows int64
@@ -145,6 +148,13 @@ func (s *smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
 		log.WithField("bad_secret", jsonReq.Secret).Error("Refusing to linkify with wrong secret")
 		w.WriteHeader(401)
 		io.WriteString(w, `{"error": "Must specify correct secret"}`)
+		return
+	}
+
+	if s.lengthLimit > 0 && len(jsonReq.LongURL) > s.lengthLimit {
+		log.WithField("url", jsonReq.LongURL).Error("Refusing to linkify long link")
+		w.WriteHeader(400)
+		io.WriteString(w, fmt.Sprintf(`{"error": "Links must be shorted than %d bytes"}`, s.lengthLimit))
 		return
 	}
 

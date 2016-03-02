@@ -67,6 +67,7 @@ func main() {
 		s.DBUpdateErrors))
 
 	http.HandleFunc("/_create", s.CreateHandler)
+	http.HandleFunc("/_delete", s.DeleteHandler)
 	http.HandleFunc("/", s.LookupHandler)
 	panic(http.ListenAndServe(*addr, nil))
 }

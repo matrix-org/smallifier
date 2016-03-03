@@ -168,6 +168,76 @@ func TestRecordsStats(t *testing.T) {
 
 }
 
+func TestDelete(t *testing.T) {
+	f := serve(t)
+	defer f.Close()
+
+	shortened := shorten(t, f.server.URL, f.server.URL+"/_stub")
+
+	deleteShortLink(t, f.server.URL, shortened)
+
+	resp, err := insecureClient().Get(shortened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("after delete want 404 got %d", resp.StatusCode)
+	}
+}
+
+func TestWrongDeleteSecret(t *testing.T) {
+	f := serve(t)
+	defer f.Close()
+
+	shortened := shorten(t, f.server.URL, f.server.URL+"/_stub")
+
+	resp, err := insecureClient().Post(f.server.URL+"/_delete", "application/json", strings.NewReader(`{
+		"short_url": "`+shortened+`",
+		"secret": "wrong`+testSecret+`"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 401 {
+		t.Error("no secret: want status code 401 got", resp.StatusCode)
+	}
+	if got := f.smallifier.AuthErrors(); got != 1 {
+		t.Errorf("auth error count: want 1 got %f", got)
+	}
+}
+
+func TestDeleteMissingLink(t *testing.T) {
+	f := serve(t)
+	defer f.Close()
+
+	resp, err := insecureClient().Post(f.server.URL+"/_delete", "application/json", strings.NewReader(`{
+		"short_url": "`+f.server.URL+`/boohoo",
+		"secret": "`+testSecret+`"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 404 {
+		t.Error("missing link: want status code 404 got", resp.StatusCode)
+	}
+}
+
+func deleteShortLink(t *testing.T, serverBaseURL, toDelete string) {
+	resp, err := insecureClient().Post(serverBaseURL+"/_delete", "application/json", strings.NewReader(`{
+		"short_url": "`+toDelete+`",
+		"secret": "`+testSecret+`"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		dump, _ := httputil.DumpResponse(resp, false)
+		t.Errorf("deleting: wrong status code; want 200 got %d HTTP response: %s", resp.StatusCode, dump)
+	}
+}
+
 func assertFollowCount(f fixture, shortPath string, want int64, msg string) {
 	for atomic.LoadInt64(&f.smallifier.(*smallifier).pendingFollows) > 0 {
 		runtime.Gosched()
@@ -235,6 +305,8 @@ func (m *mux) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	switch req.URL.Path {
 	case "/_create":
 		m.s.CreateHandler(w, req)
+	case "/_delete":
+		m.s.DeleteHandler(w, req)
 	case "/_stub":
 		io.WriteString(w, stubResponse)
 	default:

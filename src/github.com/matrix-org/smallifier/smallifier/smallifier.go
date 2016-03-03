@@ -18,11 +18,18 @@ import (
 	log "github.com/Sirupsen/logrus"
 )
 
-// Request is the JSON-encoded POST-body of an HTTP request to generate a short link.
-type Request struct {
+// CreateRequest is the JSON-encoded POST-body of an HTTP request to generate a short link.
+type CreateRequest struct {
 	// LongURL is the link to be shortened.
 	LongURL string `json:"long_url"`
 	Secret  string `json:"secret"`
+}
+
+// DeleteRequest is the JSON-encoded POST-body of an HTTP request to delete a short link.
+type DeleteRequest struct {
+	// ShortURL is the link to be deleted.
+	ShortURL string `json:"short_url"`
+	Secret   string `json:"secret"`
 }
 
 // Response is the JSON-encoded POST-body of the response to a request to generate a short link.
@@ -37,6 +44,8 @@ type Smallifier interface {
 	CreateHandler(w http.ResponseWriter, req *http.Request)
 	// HTTP handler which redirects to the long URL for the requested path.
 	LookupHandler(w http.ResponseWriter, req *http.Request)
+	// HTTP handler which accepts a JSON object containing a short_url and secret, and removes the short_url.
+	DeleteHandler(w http.ResponseWriter, req *http.Request)
 
 	// RandomErrors gets a count of the number of times that we were unable to generate a random number.
 	// In normal operating conditions, this should always return 0.
@@ -102,7 +111,7 @@ func (s *smallifier) LookupHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	shortPath := req.URL.Path[len(s.base.Path):]
-	row := s.db.QueryRow("SELECT long_url FROM links WHERE short_path = $1", shortPath)
+	row := s.db.QueryRow("SELECT long_url FROM links WHERE short_path = $1 AND deleted = 0", shortPath)
 	var link string
 	err := row.Scan(&link)
 	if err == nil {
@@ -129,13 +138,13 @@ func (s *smallifier) LookupHandler(w http.ResponseWriter, req *http.Request) {
 	io.WriteString(w, `{"error": "internal server error"}`)
 }
 
-// CreateHandler is an http.HandlerFunc which creates a shortlink as a JSON-encoded Request in the request body and returns it as a JSON-encoded Response.
+// CreateHandler is an http.HandlerFunc which creates a shortlink as a JSON-encoded CreateRequest in the request body and returns it as a JSON-encoded Response.
 func (s *smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
 	setHeaders(w)
 
 	defer req.Body.Close()
 	dec := json.NewDecoder(req.Body)
-	var jsonReq Request
+	var jsonReq CreateRequest
 	if err := dec.Decode(&jsonReq); err != nil {
 		log.Error("Got bad json: ", err)
 		w.WriteHeader(400)
@@ -174,6 +183,51 @@ func (s *smallifier) CreateHandler(w http.ResponseWriter, req *http.Request) {
 
 	enc := json.NewEncoder(w)
 	enc.Encode(Response{s.base.String() + id})
+}
+
+// DeleteHandler is an http.HandlerFunc which prevents a shortlink (passed in a JSON-encoded DeleteRequest) from being used.
+func (s *smallifier) DeleteHandler(w http.ResponseWriter, req *http.Request) {
+	setHeaders(w)
+
+	defer req.Body.Close()
+	dec := json.NewDecoder(req.Body)
+	var jsonReq DeleteRequest
+	if err := dec.Decode(&jsonReq); err != nil {
+		log.Error("Got bad json: ", err)
+		w.WriteHeader(400)
+		io.WriteString(w, `{"error": "error decoding json"}`)
+		return
+	}
+
+	if jsonReq.Secret != s.secret {
+		atomic.AddUint64(&s.authErrorCount, 1)
+		log.WithField("bad_secret", jsonReq.Secret).Error("Refusing to delete link with wrong secret")
+		w.WriteHeader(401)
+		io.WriteString(w, `{"error": "Must specify correct secret"}`)
+		return
+	}
+
+	if !strings.HasPrefix(jsonReq.ShortURL, s.base.String()) {
+		w.WriteHeader(404)
+		io.WriteString(w, `{"error": "deleting unknown link"}`)
+		return
+	}
+
+	shortPath := jsonReq.ShortURL[len(s.base.String()):]
+	r, err := s.db.Exec("UPDATE links SET deleted = 1 WHERE short_path = $1", shortPath)
+	if err != nil {
+		log.WithField("error", err).Error("Error deleting link")
+		w.WriteHeader(400)
+		io.WriteString(w, `{"error": "error deleting link"}`)
+		return
+	}
+	if ra, _ := r.RowsAffected(); ra == 0 {
+		log.WithField("short_path", shortPath).Error("Didn't find link being deleted")
+		w.WriteHeader(404)
+		io.WriteString(w, `{"error": "deleting unknown link"}`)
+		return
+	}
+	io.WriteString(w, `{}`)
 }
 
 // RandomErrors gets a count of the number of times that we were unable to generate a random number.
@@ -230,13 +284,19 @@ func CreateTables(db *sql.DB) error {
 		long_url TEXT NOT NULL,
 		create_ts BIGINT NOT NULL,
 		create_ip TEXT NOT NULL,
-		create_forwarded_for TEXT
+		create_forwarded_for TEXT,
+		deleted INTEGER DEFAULT 0
 	)`)
 	if err != nil {
 		return err
 	}
 
 	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS links_short_path on links(short_path)`)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS links_short_path_deleted on links(short_path, deleted)`)
 	if err != nil {
 		return err
 	}

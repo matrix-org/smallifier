@@ -1,4 +1,4 @@
-# smallifier
+# smallifier [![Build Status](https://travis-ci.org/matrix-org/smallifier.svg?branch=master)](https://travis-ci.org/matrix-org/smallifier)
 Smallifier is a small link shortener.
 
 It responds to HTTP requests like so:

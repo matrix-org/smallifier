@@ -1,0 +1,8 @@
+#! /bin/bash
+
+set -eu
+
+golint src/...
+go fmt ./src/...
+go tool vet --shadow ./src
+gb test -timeout 5s -test.v

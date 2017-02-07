@@ -7,4 +7,5 @@ $ curl -d '{"long_url": "https://please.smallifiy.me"}' -v https://smallifier/_c
 {"short_url":"https://smallifier/tj2TEXT7"}
 ```
 
+
 And after this, navigating to ``https://smallifier/tj2TEXT7`` will 302 you to https://please.smallify.me
